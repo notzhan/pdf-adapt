@@ -83,18 +83,29 @@ function chooseCut(lines: Array<[number, number]>, top: number, bottom: number):
 
 async function textIntervals(page: pdfjs.PDFPageProxy, box: Box): Promise<Array<[number, number]>> {
   const viewport = page.getViewport({ scale: 1, rotation: 0 })
-  const content = await page.getTextContent()
   const intervals: Array<[number, number]> = []
-  for (const item of content.items) {
-    if (!('str' in item) || !item.str.trim()) continue
-    const transform = pdfjs.Util.transform(viewport.transform, item.transform)
-    const height = Math.max(1, Math.hypot(transform[2], transform[3]))
-    const yTop = transform[5] - height
-    const yBottom = transform[5]
-    // PDF.js viewport is top-down; map it into the source crop box.
-    const lower = box.top - yBottom * size(box).height / viewport.height
-    const upper = box.top - yTop * size(box).height / viewport.height
-    intervals.push([Math.min(lower, upper) - 1.5, Math.max(lower, upper) + 1.5])
+  // PDF.js getTextContent() uses `for await` on a ReadableStream. Safari
+  // versions without ReadableStream async iteration throw at that point.
+  // Reading chunks directly is also gentler on memory for large pages.
+  const reader = page.streamTextContent().getReader()
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      for (const item of value.items) {
+        if (!('str' in item) || !item.str.trim()) continue
+        const transform = pdfjs.Util.transform(viewport.transform, item.transform)
+        const height = Math.max(1, Math.hypot(transform[2], transform[3]))
+        const yTop = transform[5] - height
+        const yBottom = transform[5]
+        // PDF.js viewport is top-down; map it into the source crop box.
+        const lower = box.top - yBottom * size(box).height / viewport.height
+        const upper = box.top - yTop * size(box).height / viewport.height
+        intervals.push([Math.min(lower, upper) - 1.5, Math.max(lower, upper) + 1.5])
+      }
+    }
+  } finally {
+    reader.releaseLock()
   }
   return intervals
 }
