@@ -141,22 +141,26 @@ export async function convert(file: File, options: Options, progress: Progress):
       analysis = await task.promise
     }
     if (options.mode === 'ipad') {
+      const boxes = pages.map(pageBox)
+      // One embedPages call shares one PDFObjectCopier across all source pages.
+      // Repeated embedPage calls duplicate shared fonts and images per page.
+      progress(0, pages.length, '正在整理 PDF 共用资源…')
+      const embeddedPages = await output.embedPages(pages, boxes)
       const groups: Array<[number | null, number | null]> = []
       let index = 0
       if (options.bookSpread) { groups.push([null, 0]); index = 1 }
       while (index < pages.length) { groups.push([index, index + 1 < pages.length ? index + 1 : null]); index += 2 }
       for (let i = 0; i < groups.length; i++) {
         const [leftIndex, rightIndex] = groups[i]
-        const leftBox = leftIndex === null ? null : pageBox(pages[leftIndex])
-        const rightBox = rightIndex === null ? null : pageBox(pages[rightIndex])
+        const leftBox = leftIndex === null ? null : boxes[leftIndex]
+        const rightBox = rightIndex === null ? null : boxes[rightIndex]
         const slotWidth = Math.max(leftBox ? size(leftBox).width : 0, rightBox ? size(rightBox).width : 0)
         const slotHeight = Math.max(leftBox ? size(leftBox).height : 0, rightBox ? size(rightBox).height : 0)
         const out = output.addPage([slotWidth * 2 + options.gutter + options.margin * 2, slotHeight + options.margin * 2])
         for (const [pageIndex, box, slot] of [[leftIndex, leftBox, 0], [rightIndex, rightBox, 1]] as const) {
           if (pageIndex === null || box === null) continue
-          const embedded = await output.embedPage(pages[pageIndex], box)
           const dimensions = size(box)
-          out.drawPage(embedded, {
+          out.drawPage(embeddedPages[pageIndex], {
             x: options.margin + slot * (slotWidth + options.gutter) + (slotWidth - dimensions.width) / 2,
             y: options.margin + (slotHeight - dimensions.height) / 2,
             width: dimensions.width,
@@ -167,19 +171,32 @@ export async function convert(file: File, options: Options, progress: Progress):
         await new Promise(resolve => setTimeout(resolve, 0))
       }
     } else {
+      const sourceParts: PDFPage[] = []
+      const partBoxes: Box[] = []
       for (let i = 0; i < pages.length; i++) {
-        const box = validateTrim(pageBox(pages[i]), options)
+        const originalBox = pageBox(pages[i])
+        const box = validateTrim(originalBox, options)
         const cut = analysis
-          ? chooseCut(await textIntervals(await analysis.getPage(i + 1), pageBox(pages[i])), box.top, box.bottom)
+          ? chooseCut(await textIntervals(await analysis.getPage(i + 1), originalBox), box.top, box.bottom)
           : (box.top + box.bottom) / 2
         for (const part of [{ ...box, bottom: cut }, { ...box, top: cut }]) {
-          const dimensions = size(part)
-          const embedded = await output.embedPage(pages[i], part)
-          const out = output.addPage([dimensions.width, dimensions.height])
-          out.drawPage(embedded, { x: 0, y: 0, width: dimensions.width, height: dimensions.height })
+          sourceParts.push(pages[i])
+          partBoxes.push(part)
         }
-        progress(i + 1, pages.length, `已完成 ${i + 1} / ${pages.length} 页`)
+        progress(i + 1, pages.length * 2, `已分析 ${i + 1} / ${pages.length} 页`)
         await new Promise(resolve => setTimeout(resolve, 0))
+      }
+      progress(pages.length, pages.length * 2, '正在整理 PDF 共用资源…')
+      const embeddedParts = await output.embedPages(sourceParts, partBoxes)
+      for (let i = 0; i < embeddedParts.length; i++) {
+        const dimensions = size(partBoxes[i])
+        const out = output.addPage([dimensions.width, dimensions.height])
+        out.drawPage(embeddedParts[i], { x: 0, y: 0, width: dimensions.width, height: dimensions.height })
+        if (i % 2 === 1) {
+          const done = (i + 1) / 2
+          progress(pages.length + done, pages.length * 2, `已排版 ${done} / ${pages.length} 页`)
+          await new Promise(resolve => setTimeout(resolve, 0))
+        }
       }
     }
     progress(1, 1, '正在保存 PDF…')
